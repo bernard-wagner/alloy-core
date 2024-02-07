@@ -690,12 +690,33 @@ impl DynSolValue {
             Self::Uint(num, size) => {
                 let byte_size: usize = *size / 8;
                 buf.extend_from_slice(&num.to_be_bytes::<32>()[(32 - byte_size)..]);
-            }
-            as_fixed_seq!(inner) | Self::Array(inner) => {
+            },
+            Self::FixedArray(inner) | Self::Array(inner) => {
                 for val in inner {
-                    val.abi_encode_packed_to(buf);
+                    let mut buf_inner = Vec::new();
+                    val.abi_encode_packed_to(&mut buf_inner);
+
+                    // Array elements are always padded
+                    if buf_inner.len() < 32 {
+                        // Calculate the number of padding elements needed
+                        let padding_needed = 32 - buf_inner.len();
+
+                        // Extend the vector with the padding elements
+                        buf_inner.resize(32, 0);
+
+                        // Rotate the vector left by the number of padding elements added
+                        buf_inner.rotate_right(padding_needed);
+                    }
+                    buf.extend_from_slice(&buf_inner);
                 }
-            }
+            },
+            Self::Tuple(_) => {
+                unreachable!()
+            },
+            #[cfg(feature = "eip712")]
+            Self::CustomStruct { .. } => {
+                unreachable!()
+            },
         }
     }
 
@@ -791,6 +812,7 @@ impl DynSolValue {
 
 #[cfg(test)]
 mod tests {
+    use hex::FromHex;
     use alloy_primitives::U256;
     use crate::DynSolValue;
 
@@ -864,6 +886,35 @@ mod tests {
             U256::from(3).to_be_bytes::<32>().to_vec(),
             U256::from(4).to_be_bytes::<32>().to_vec(),
         ].concat());
+    }
+
+    #[test]
+    fn abi_encode_packed_mix() {
+        // abi.encodePacked(uint16(1), address(0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045), "hello", bytes2(uint16(2)), true, [address(0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045)], [[1, 2], [3, 4]])
+        let expected: Vec<u8> = Vec::from_hex("0001d8da6bf26964af9d7eed9e03e53415d37aa9604568656c6c6f000201000000000000000000000000d8da6bf26964af9d7eed9e03e53415d37aa960450000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000004").unwrap();
+
+        let values = vec![
+            DynSolValue::Uint(U256::from(1), 16),
+            DynSolValue::Address("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045".parse().unwrap()),
+            DynSolValue::String("hello".to_owned()),
+            DynSolValue::Bytes(vec![0x00, 0x02]),
+            DynSolValue::Bool(true),
+            DynSolValue::Array(vec![DynSolValue::Address("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045".parse().unwrap())]),
+            DynSolValue::Array(vec![
+                DynSolValue::Array(vec![
+                    DynSolValue::Uint(U256::from(1), 32),
+                    DynSolValue::Uint(U256::from(2), 32),
+                ]),
+                DynSolValue::Array(vec![
+                    DynSolValue::Uint(U256::from(3), 32),
+                    DynSolValue::Uint(U256::from(4), 32),
+                ]),
+            ]),
+        ];
+
+        let encoded = values.iter().map(|v| v.abi_encode_packed()).flatten().collect::<Vec<_>>();
+
+        assert_eq!(encoded, expected);
     }
 }
 
